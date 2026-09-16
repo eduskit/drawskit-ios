@@ -1,0 +1,42 @@
+{
+  "pen": {
+    "file": "cursor-pen.png",
+    "hotspot": [2, 22],
+    "fallback": "crosshair"
+  },
+  "highlighter": {
+    "file": "cursor-hightlight.png",
+    "hotspot": [2, 22],
+    "fallback": "crosshair"
+  },
+  "eraser": {
+    "file": "cursor-eraser.png",
+    "hotspot": [16, 16],
+    "fallback": "crosshair"
+  },
+  "pan": {
+    "file": "cursor-move.png",
+    "hotspot": [16, 16],
+    "fallback": "grab"
+  },
+  "text": {
+    "file": "cursor-txt.png",
+    "hotspot": [16, 16],
+    "fallback": "text"
+  },
+  "laser": {
+    "file": null,
+    "hotspot": [0, 0],
+    "fallback": "pointer"
+  },
+  "shape": {
+    "file": null,
+    "hotspot": [0, 0],
+    "fallback": "crosshair"
+  },
+  "select": {
+    "file": null,
+    "hotspot": [0, 0],
+    "fallback": "default"
+  }
+}
