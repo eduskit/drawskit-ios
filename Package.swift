@@ -13,8 +13,8 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "WhiteboardFFI",
-            url: "https://sdk.eduskit.com/drawskit/ios/0.1.3/binary.zip",
-            checksum: "a48751523f2cbc59b6636e8da56970e8b53ac825790a9280127bd0d6f0cad516"
+            url: "https://sdk.eduskit.com/drawskit/ios/0.1.4/binary.zip",
+            checksum: "9ec823e33802397bae6bd8afa66692640d98cf5ed20dd75845df8f300d6aadfe"
         ),
         .target(
             name: "DrawsKit",

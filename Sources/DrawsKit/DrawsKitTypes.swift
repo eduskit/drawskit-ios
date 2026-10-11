@@ -12,7 +12,7 @@ public struct RoomBootstrapPayload {
     }
 }
 
-/// Cloud recording session from sdk-api `/v1/rooms/:roomId/recording/…`.
+/// Cloud recording session from sdk-api `/v1/rooms/recording/…`.
 public struct RecordingSession {
     public let recordingId: String
     public let appId: String?

@@ -143,19 +143,6 @@ internal final class RoomApiClient {
         )
     }
 
-    /// Refresh private courseware URLs using the existing Room Token.
-    func refreshCoursewareAssets(
-        fileId: String,
-        timeoutMs: Int = SyncPolicy.coursewareRefreshHttpTimeoutMs
-    ) throws -> [String: Any] {
-        let encoded = fileId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? fileId
-        return try requestJson(
-            method: "GET",
-            urlString: roomUrl("coursewares/\(encoded)/assets"),
-            timeoutInterval: TimeInterval(timeoutMs) / 1_000
-        )
-    }
-
     /// Start cloud recording (sdk-api `/v1/...`, not `/api/v1`).
     func startRecording(externalRef: String? = nil) throws -> RecordingSession {
         var body: [String: Any] = [:]
@@ -201,9 +188,9 @@ internal final class RoomApiClient {
     }
 
     private func fetchBootstrapPage(sinceSeq: Int64?) throws -> RoomBootstrapPage {
-        var urlString = roomUrl(DrawsKitServerHosts.endpointBootstrap)
+        var urlString = roomQueryUrl(DrawsKitServerHosts.endpointBootstrap)
         if let sinceSeq, sinceSeq > 0 {
-            urlString += "?since_seq=\(sinceSeq)"
+            urlString += "&since_seq=\(sinceSeq)"
         }
         let json = try requestJson(method: "GET", urlString: urlString)
         let hydrated = try WorkspaceBlob.hydrateBootstrapPage(json)
@@ -250,16 +237,20 @@ internal final class RoomApiClient {
         return RoomBootstrapPayload(workspace: workspace, checkpointSeq: checkpointSeq, tail: tail)
     }
 
+    private func roomQueryUrl(_ suffix: String, filters: [URLQueryItem] = []) -> String {
+        var components = URLComponents(string: roomUrl(suffix))!
+        components.queryItems = [URLQueryItem(name: "roomId", value: config.roomId)] + filters
+        return components.url!.absoluteString
+    }
+
     private func roomUrl(_ suffix: String) -> String {
-        let room = config.roomId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? config.roomId
-        return "\(baseUrl())/rooms/\(room)/\(suffix)"
+        return "\(baseUrl())/rooms/\(suffix)"
     }
 
     private func recordingUrl(_ suffix: String) -> String {
         let host = config.serverHost.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let path = DrawsKitServerHosts.recordingPathDefault.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let room = config.roomId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? config.roomId
-        return "\(host)/\(path)/rooms/\(room)/\(suffix)"
+        return "\(host)/\(path)/rooms/\(suffix)"
     }
 
     func collaborationBaseUrl() -> String { baseUrl() }
@@ -316,7 +307,8 @@ internal final class RoomApiClient {
             request.httpMethod = method
             if let timeoutInterval { request.timeoutInterval = timeoutInterval }
             applyAuth(&request)
-            if let body {
+            if var body {
+                body["roomId"] = config.roomId
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 request.httpBody = try JSONSerialization.data(withJSONObject: body)
             }

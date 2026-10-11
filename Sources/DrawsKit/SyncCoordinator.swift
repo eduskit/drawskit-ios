@@ -50,23 +50,12 @@ final class SyncCoordinator {
     private let ioQueue = DispatchQueue(label: "io.drawskit.room-api", qos: .utility)
     /// Policy/JSON/retry actor. Never target the UIKit render/main queue.
     private let coordinationQueue = DispatchQueue(label: "io.drawskit.sync-coordinator", qos: .utility)
-    private let coursewareRefreshQueue: OperationQueue = {
-        let queue = OperationQueue()
-        queue.name = "io.drawskit.courseware-refresh"
-        queue.qualityOfService = .utility
-        queue.maxConcurrentOperationCount = 4
-        return queue
-    }()
     private let outbox: SyncOutboxStore?
     private let checkpointStore: WorkspaceCheckpointStore?
     private let exportWorkspace: (() -> [String: Any]?)?
     private let importWorkspace: (([String: Any]) -> Void)?
     private let log: OperationLogger?
     private let prefetchCoursewarePage: ((String, String) -> Void)?
-    private var visibleCoursewareFileId: String?
-    private var visibleCoursewarePageIndex = 0
-    private var prefetchedCoursewareUrl: String?
-    private var visibleRefreshTimeoutMs = SyncPolicy.coursewareRefreshHttpTimeoutMs
     private var outboxHydrated = false
     private var localCheckpointSeq: Int64 = 0
     private var prefetchWorkItems: [DispatchWorkItem] = []
@@ -642,45 +631,8 @@ final class SyncCoordinator {
     }
 
     private func executeCoursewareRuntimeCommands(_ commands: [[String: Any]]) {
-        guard let roomApi else { return }
         for command in commands {
             switch command["type"] as? String {
-            case "http" where command["endpoint"] as? String == "courseware_assets":
-                guard let query = command["query"] as? [String: Any],
-                      let fileId = query["file_id"] as? String,
-                      !fileId.isEmpty else { continue }
-                let requestId = (command["request_id"] as? NSNumber)?.int64Value ?? 0
-                ioQueue.async { [weak self] in
-                    guard let self else { return }
-                    do {
-                        var response = try roomApi.refreshCoursewareAssets(
-                        fileId: fileId,
-                        timeoutMs: visibleRefreshTimeoutMs
-                    )
-                        if let file = response["file"] as? [String: Any] {
-                            response["file"] = self.rewriteCoursewareFile(file)
-                        }
-                        self.coordinationQueue.async {
-                            self.executeCoursewareRuntimeCommands(self.syncRuntime.handle([
-                                "type": "http_result",
-                                "request_id": requestId,
-                                "ok": true,
-                                "body": response,
-                            ]))
-                        }
-                    } catch {
-                        var result: [String: Any] = [
-                            "type": "http_result",
-                            "request_id": requestId,
-                            "ok": false,
-                            "error": error.localizedDescription,
-                        ]
-                        if let status = (error as? RoomApiHttpError)?.status { result["status"] = status }
-                        self.coordinationQueue.async {
-                            self.executeCoursewareRuntimeCommands(self.syncRuntime.handle(result))
-                        }
-                    }
-                }
             case "bridge_refresh_courseware":
                 if let file = command["file"] as? [String: Any],
                    let event = coursewareRefreshEvent(file) {
@@ -699,19 +651,6 @@ final class SyncCoordinator {
             default:
                 break
             }
-        }
-    }
-
-    private func noteCoursewareAssetRefreshed(fileId: String, response: [String: Any]) {
-        guard let expiresIn = (response["assetUrlExpiresIn"] as? NSNumber)?.int64Value,
-              expiresIn > 0 else { return }
-        coordinationQueue.async { [weak self] in
-            guard let self else { return }
-            self.executeCoursewareRuntimeCommands(self.syncRuntime.handle([
-                "type": "courseware_asset_refreshed",
-                "file_id": fileId,
-                "expires_in_seconds": expiresIn,
-            ]))
         }
     }
 
@@ -797,7 +736,6 @@ final class SyncCoordinator {
         liveStrokeTickerDestroyed = true
         liveStrokeTickerLock.unlock()
         cancelBoardPrefetch()
-        coursewareRefreshQueue.cancelAllOperations()
         coursewareRefreshWorkItems.values.forEach { $0.cancel() }
         coursewareRefreshWorkItems.removeAll()
         cancelLiveStrokePrune()
@@ -943,8 +881,7 @@ final class SyncCoordinator {
     }
 
     private func bootstrap(_ state: RoomBootstrapPayload) {
-        let refresh = refreshBootstrapCoursewareAssets(state)
-        let refreshedState = refresh.state
+        let refreshedState = prepareCoursewareBootstrap(state)
         log?.action(
             "room.bootstrap",
             phase: "start",
@@ -959,7 +896,6 @@ final class SyncCoordinator {
             payload["checkpoint_seq"] = refreshedState.checkpointSeq
             payload["tail"] = refreshedState.tail
         })
-        refreshCoursewareAssetsInBackground(refresh.deferredBatches)
         seedServerSeq(refreshedState)
         completeHistorySync(Int64(Date().timeIntervalSince1970 * 1000))
         log?.action(
@@ -974,9 +910,9 @@ final class SyncCoordinator {
         ]))
     }
 
-    private func refreshBootstrapCoursewareAssets(
+    private func prepareCoursewareBootstrap(
         _ state: RoomBootstrapPayload
-    ) -> (state: RoomBootstrapPayload, deferredBatches: [[String]]) {
+    ) -> RoomBootstrapPayload {
         var bootstrap = bootstrapDict(state)
         var nextState = state
         if let roomApi {
@@ -990,31 +926,12 @@ final class SyncCoordinator {
             }
         }
         guard let plan = try? SyncPolicy.planCoursewareAssetRefresh(bootstrap) else {
-            return (nextState, [])
+            return nextState
         }
         if plan.prefetchFirstPage, let first = plan.firstPage {
             prefetchFirstPage(url: first.url, format: first.format)
         }
-        var deferred = plan.deferredBatches
-        if let activeId = plan.blockingFileIds.first, roomApi != nil {
-            visibleCoursewareFileId = activeId
-            visibleCoursewarePageIndex = plan.firstPage?.pageIndex ?? 0
-            prefetchedCoursewareUrl = plan.firstPage?.url
-            visibleRefreshTimeoutMs = plan.httpTimeoutMs > 0
-                ? plan.httpTimeoutMs
-                : SyncPolicy.coursewareRefreshHttpTimeoutMs
-            deferred.insert([activeId], at: 0)
-        }
-        return (nextState, deferred)
-    }
-
-    private func rewriteCoursewareFile(_ file: [String: Any]) -> [String: Any] {
-        guard let roomApi else { return file }
-        return (try? SyncPolicy.rewriteCoursewareFileContentUrls(
-            file,
-            roomApiBase: roomApi.collaborationBaseUrl(),
-            roomId: roomApi.roomId()
-        )) ?? file
+        return nextState
     }
 
     private func payloadFromBootstrapDict(_ dict: [String: Any]) -> RoomBootstrapPayload {
@@ -1028,65 +945,6 @@ final class SyncCoordinator {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         prefetchCoursewarePage?(trimmed, format)
-    }
-
-    private func prefetchRefreshedVisiblePage(_ file: [String: Any]) {
-        guard let pages = normalizedCoursewarePages(file), !pages.isEmpty else { return }
-        let index = min(max(0, visibleCoursewarePageIndex), pages.count - 1)
-        let url = coursewarePageUrl(pages[index])
-        guard !url.isEmpty else { return }
-        prefetchedCoursewareUrl = url
-        prefetchFirstPage(url: url, format: pages[index]["format"] as? String ?? "")
-    }
-
-    private func refreshCoursewareAssetsInBackground(_ batches: [[String]]) {
-        guard let roomApi else { return }
-        ioQueue.async { [weak self] in
-            guard let self else { return }
-            for batch in batches {
-                for fileId in batch {
-                let startedAt = CFAbsoluteTimeGetCurrent()
-                do {
-                    let response = try roomApi.refreshCoursewareAssets(
-                        fileId: fileId,
-                        timeoutMs: self.visibleRefreshTimeoutMs
-                    )
-                    guard let rawFile = response["file"] as? [String: Any] else {
-                        self.logCoursewareRefresh(fileId, startedAt: startedAt, result: "invalid_payload", blocking: false)
-                        continue
-                    }
-                    let file = self.rewriteCoursewareFile(rawFile)
-                    guard self.coursewareFileId(file) == fileId else {
-                        self.logCoursewareRefresh(fileId, startedAt: startedAt, result: "invalid_payload", blocking: false)
-                        continue
-                    }
-                    self.noteCoursewareAssetRefreshed(fileId: fileId, response: response)
-                    if fileId == self.visibleCoursewareFileId {
-                        self.prefetchRefreshedVisiblePage(file)
-                    }
-                    guard let event = self.coursewareRefreshEvent(file) else { continue }
-                    self.coordinationQueue.async { [weak self] in self?.sendJson(event) }
-                    self.logCoursewareRefresh(fileId, startedAt: startedAt, result: "background_updated", blocking: false)
-                } catch {
-                    self.logCoursewareRefresh(
-                        fileId,
-                        startedAt: startedAt,
-                        result: "background_fallback",
-                        blocking: false,
-                        message: error.localizedDescription
-                    )
-                    self.coordinationQueue.async { [weak self] in
-                        guard let self else { return }
-                        self.executeCoursewareRuntimeCommands(self.syncRuntime.handle([
-                            "type": "courseware_asset_refresh_due",
-                            "file_id": fileId,
-                            "now_ms": Int64(Date().timeIntervalSince1970 * 1_000),
-                        ]))
-                    }
-                }
-            }
-            }
-        }
     }
 
     private func bootstrapDict(_ state: RoomBootstrapPayload) -> [String: Any] {
@@ -1137,26 +995,6 @@ final class SyncCoordinator {
             payload["pages"] = pages
             payload["title"] = file["title"] ?? NSNull()
         }
-    }
-
-    private func logCoursewareRefresh(
-        _ fileId: String,
-        startedAt: CFAbsoluteTime,
-        result: String,
-        blocking: Bool,
-        message: String? = nil
-    ) {
-        log?.action(
-            "courseware.assets.refresh",
-            phase: result == "updated" || result == "background_updated" ? "ok" : "skip",
-            result: result,
-            detail: [
-                "file_id": fileId,
-                "blocking": blocking,
-                "duration_ms": (CFAbsoluteTimeGetCurrent() - startedAt) * 1_000,
-                "message": message as Any,
-            ]
-        )
     }
 
     private func cancelBoardPrefetch() {
