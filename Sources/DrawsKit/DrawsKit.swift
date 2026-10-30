@@ -3,7 +3,7 @@ import UIKit
 
 /// DrawsKit 互动白板 SDK（iOS）— 公开 API 薄封装，业务逻辑在 Rust 引擎。
 public final class DrawsKit {
-    public static let SDK_VERSION = "0.1.5"
+    public static let SDK_VERSION = "0.1.6"
 
     public static let EVENT = DrawsKitConstants.EVENT.self
     public static let ToolType = DrawsKitConstants.ToolType.self
@@ -145,8 +145,9 @@ public final class DrawsKit {
 
     // ── 课件 / 文件 ──
 
-    public func addTranscodeFile(_ manifest: Any, baseUrl: String? = nil) -> String {
-        engine.addTranscodeFile(manifest, baseUrl: baseUrl)
+    @MainActor
+    public func addTranscodeFile(_ manifest: Any, baseUrl: String? = nil, title: String? = nil) async throws -> String {
+        try await engine.addTranscodeFile(manifest, baseUrl: baseUrl, title: title)
     }
     public func addImagesFile(_ urls: [String], _ title: String? = nil) -> String {
         engine.addImagesFile(urls, title: title)
@@ -224,13 +225,6 @@ public final class DrawsKit {
     public func cancelSelect() { engine.cancelSelect() }
     public func autoSelectedElement(_ id: String) { engine.autoSelectedElement(id) }
 
-    public func copyElementsByIds(_ ids: String) {
-        let list = ids.split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        copyElementsByIds(list)
-    }
-
     public func copyElementsByIds(_ ids: [String]) { engine.copyElementsByIds(ids) }
 
     public func getSelectedElementIds() -> [String] { engine.getSelectedElementIds() }
@@ -288,13 +282,16 @@ public final class DrawsKit {
         return id
     }
     public func addImageElement(_ url: String, _ options: Any? = nil) -> String { Self.todo("addImageElement"); return "" }
-    public func removeElement(_ id: String) { Self.todo("removeElement") }
+    public func removeElement(_ id: String) { engine.removeElementsByIds([id]) }
+    public func removeElementsByIds(_ ids: [String]) { engine.removeElementsByIds(ids) }
+    public func bringElementsToFront(_ ids: [String]) { engine.reorderElements(ids, "front") }
+    public func sendElementsToBack(_ ids: [String]) { engine.reorderElements(ids, "back") }
     public func updateElementById(_ id: String, _ data: Any) { Self.todo("updateElementById") }
     public func getElementById(_ id: String) -> Any? { Self.todo("getElementById"); return nil }
-    public func lockElements(_ ids: String, _ locked: Bool) { Self.todo("lockElements") }
+    public func lockElements(_ ids: [String], _ locked: Bool) { engine.lockElements(ids, locked) }
     public func setElementsDisplay(_ ids: String, _ visible: Bool) { Self.todo("setElementsDisplay") }
-    public func bringImageElementToFront(_ id: String) { Self.todo("bringImageElementToFront") }
-    public func sendImageElementToBack(_ id: String) { Self.todo("sendImageElementToBack") }
+    public func bringImageElementToFront(_ id: String) { bringElementsToFront([id]) }
+    public func sendImageElementToBack(_ id: String) { sendElementsToBack([id]) }
     public func enableShowGraffiti(_ enable: Bool) { Self.todo("enableShowGraffiti") }
     public func setBackgroundColor(_ color: String) { Self.todo("setBackgroundColor") }
     public func getBackgroundColor() -> String { Self.todo("getBackgroundColor"); return "#ffffff" }

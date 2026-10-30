@@ -3,7 +3,8 @@ import Foundation
 /// Transcode-service wire contract. See docs/protocol/courseware-manifest.md.
 let coursewareSchemaVersion = "1.0"
 
-struct MediaSlot {
+struct MediaSlot: Decodable {
+    enum CodingKeys: String, CodingKey { case mediaId = "media_id", type, url, rect, poster }
     let mediaId: String
     let type: String
     let url: String
@@ -11,7 +12,8 @@ struct MediaSlot {
     let poster: String?
 }
 
-struct CoursewarePage {
+struct CoursewarePage: Decodable {
+    enum CodingKeys: String, CodingKey { case url, format, width, height, sourcePage = "source_page", step, remarks, media }
     let url: String
     let format: String
     let width: Double
@@ -22,7 +24,7 @@ struct CoursewarePage {
     let media: [MediaSlot]
 }
 
-struct CoursewarePayload {
+struct CoursewarePayload: Decodable {
     let fileId: String
     let title: String?
     let sourceType: String
@@ -35,92 +37,25 @@ struct H5CoursewarePayload {
     let title: String?
 }
 
-enum ManifestError {
-    case notAnObject
-    case unsupportedVersion
-    case missingFileId
-    case emptyPages
-    case invalidPage
-    case missingBaseUrl
-}
-
-enum ManifestParseResult {
-    case ok(CoursewarePayload)
-    case failure(ManifestError)
-}
-
 enum CoursewareMap {
-    /// Parses the transcode-service manifest. Relative asset paths resolve against
-    /// `baseUrl` (the package root that contains `manifest.json`).
-    static func parseManifest(_ manifest: Any?, baseUrl: String? = nil) -> ManifestParseResult {
-        guard let map = asDictionary(manifest) else { return .failure(.notAnObject) }
-        guard isSupportedSchemaVersion(map["schemaVersion"]) else {
-            return .failure(.unsupportedVersion)
+    private struct Response: Decodable {
+        let ok: Bool
+        let payload: CoursewarePayload?
+        let message: String?
+    }
+    /// DTO conversion only; manifest semantics live in shared Rust.
+    static func parseManifest(_ manifest: Any, baseUrl: String?, title: String?) throws -> CoursewarePayload {
+        let input: String
+        if let raw = manifest as? String { input = raw }
+        else if let raw = manifest as? Data { input = String(decoding: raw, as: UTF8.self) }
+        else { input = String(decoding: try JSONSerialization.data(withJSONObject: manifest), as: UTF8.self) }
+        let data = try NativeEngine.parseCoursewareManifestJson(input, baseUrl: baseUrl, title: title)
+        let response = try JSONDecoder().decode(Response.self, from: data)
+        guard response.ok, let payload = response.payload else {
+            throw NSError(domain: "DrawsKit.Manifest", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: response.message ?? "Invalid manifest response"])
         }
-        let fileId = (map["coursewareId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !fileId.isEmpty else { return .failure(.missingFileId) }
-        guard let slides = map["slides"] as? [Any], !slides.isEmpty else {
-            return .failure(.emptyPages)
-        }
-
-        let root = baseUrl?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let catalog = buildMediaCatalog(map["media"])
-        var pages: [CoursewarePage] = []
-
-        for rawSlide in slides {
-            guard let slide = rawSlide as? [String: Any],
-                  let steps = slide["steps"] as? [Any] else {
-                return .failure(.invalidPage)
-            }
-            let slideIndex = (slide["slideIndex"] as? NSNumber)?.intValue ?? (pages.count + 1)
-            for rawStep in steps {
-                guard let step = rawStep as? [String: Any],
-                      let asset = stepAsset(step) else {
-                    return .failure(.invalidPage)
-                }
-                guard let url = resolveAssetUrl(asset.src, baseUrl: root) else {
-                    return .failure(.missingBaseUrl)
-                }
-                let stepIndex = (step["stepIndex"] as? NSNumber)?.intValue ?? 0
-                guard let media = mediaForStep(
-                    catalog: catalog,
-                    slideIndex: slideIndex,
-                    stepIndex: stepIndex,
-                    visibleMediaIds: step["visibleMediaIds"],
-                    pageWidth: asset.width,
-                    pageHeight: asset.height,
-                    baseUrl: root
-                ) else {
-                    return .failure(.missingBaseUrl)
-                }
-                pages.append(
-                    CoursewarePage(
-                        url: url,
-                        format: asset.format,
-                        width: asset.width,
-                        height: asset.height,
-                        sourcePage: slideIndex,
-                        step: stepIndex,
-                        remarks: nil,
-                        media: media
-                    )
-                )
-            }
-        }
-
-        guard !pages.isEmpty else { return .failure(.emptyPages) }
-        let source = map["source"] as? [String: Any]
-        let title = (source?["fileName"] as? String).flatMap {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
-        } ?? fileId
-        return .ok(
-            CoursewarePayload(
-                fileId: fileId,
-                title: title,
-                sourceType: sourceTypeFromFileType(source?["fileType"] as? String),
-                pages: pages
-            )
-        )
+        return payload
     }
 
     static func buildVideoFilePayload(_ url: String, title: String?) -> CoursewarePayload? {
@@ -188,179 +123,9 @@ enum CoursewareMap {
         )
     }
 
-    static func errorMessage(_ error: ManifestError) -> String {
-        switch error {
-        case .unsupportedVersion:
-            return "Unsupported courseware schemaVersion (expected \(coursewareSchemaVersion))"
-        case .missingFileId:
-            return "Courseware manifest is missing a server-issued coursewareId"
-        case .emptyPages:
-            return "Courseware manifest has no slides/steps"
-        case .invalidPage:
-            return "Courseware manifest contains a step without a renderable asset"
-        case .missingBaseUrl:
-            return "Courseware manifest uses relative asset paths; pass baseUrl (package root)"
-        case .notAnObject:
-            return "Courseware manifest must be an object"
-        }
-    }
-
     static func manifestBaseUrl(_ manifestUrl: String) -> String {
         guard let url = URL(string: manifestUrl) else { return manifestUrl }
         return url.deletingLastPathComponent().absoluteString
-    }
-
-    static func resolveAssetUrl(_ src: String, baseUrl: String?) -> String? {
-        let trimmed = src.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        if trimmed.contains("://") || trimmed.hasPrefix("data:") || trimmed.hasPrefix("file:") {
-            return trimmed
-        }
-        guard let baseUrl, !baseUrl.isEmpty else { return nil }
-        let root = baseUrl.hasSuffix("/") ? baseUrl : baseUrl + "/"
-        guard let base = URL(string: root),
-              let resolved = URL(string: trimmed, relativeTo: base)?.absoluteURL else {
-            return nil
-        }
-        return resolved.absoluteString
-    }
-
-    private static func asDictionary(_ manifest: Any?) -> [String: Any]? {
-        switch manifest {
-        case let map as [String: Any]:
-            return map
-        case let text as String:
-            return text.data(using: .utf8).flatMap(decodeJsonObject)
-        case let data as Data:
-            return decodeJsonObject(data)
-        default:
-            return nil
-        }
-    }
-
-    private static func decodeJsonObject(_ data: Data) -> [String: Any]? {
-        (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-    }
-
-    private static func isSupportedSchemaVersion(_ value: Any?) -> Bool {
-        switch value {
-        case let number as NSNumber:
-            return number.doubleValue == 1.0
-        case let text as String:
-            return text == "1" || text == "1.0" || text.range(of: #"^1\.\d+$"#, options: .regularExpression) != nil
-        default:
-            return false
-        }
-    }
-
-    private static func sourceTypeFromFileType(_ fileType: String?) -> String {
-        switch fileType?.lowercased() {
-        case "ppt", "pptx": return "ppt"
-        case "pdf": return "pdf"
-        case "doc", "docx": return "doc"
-        default: return "image"
-        }
-    }
-
-    private struct StepAsset {
-        let src: String
-        let width: Double
-        let height: Double
-        let format: String
-    }
-
-    private static func stepAsset(_ step: [String: Any]) -> StepAsset? {
-        if let svg = step["svg"] as? [String: Any],
-           let src = svg["src"] as? String, !src.isEmpty {
-            return StepAsset(
-                src: src,
-                width: (svg["width"] as? NSNumber)?.doubleValue ?? 0,
-                height: (svg["height"] as? NSNumber)?.doubleValue ?? 0,
-                format: "svg"
-            )
-        }
-        if let webp = step["webp"] as? [String: Any],
-           let src = webp["src"] as? String, !src.isEmpty {
-            return StepAsset(
-                src: src,
-                width: (webp["width"] as? NSNumber)?.doubleValue ?? 0,
-                height: (webp["height"] as? NSNumber)?.doubleValue ?? 0,
-                format: "webp"
-            )
-        }
-        return nil
-    }
-
-    private struct MediaCatalogEntry {
-        let mediaId: String
-        let type: String
-        let src: String
-        let poster: String?
-        let placements: [[String: Any]]
-    }
-
-    private static func buildMediaCatalog(_ raw: Any?) -> [String: MediaCatalogEntry] {
-        guard let list = raw as? [Any] else { return [:] }
-        var catalog: [String: MediaCatalogEntry] = [:]
-        for item in list {
-            guard let map = item as? [String: Any],
-                  let mediaId = map["mediaId"] as? String, !mediaId.isEmpty,
-                  let src = map["src"] as? String, !src.isEmpty else { continue }
-            let placements = (map["placements"] as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
-            catalog[mediaId] = MediaCatalogEntry(
-                mediaId: mediaId,
-                type: (map["type"] as? String) == "audio" ? "audio" : "video",
-                src: src,
-                poster: map["poster"] as? String,
-                placements: placements
-            )
-        }
-        return catalog
-    }
-
-    private static func mediaForStep(
-        catalog: [String: MediaCatalogEntry],
-        slideIndex: Int,
-        stepIndex: Int,
-        visibleMediaIds: Any?,
-        pageWidth: Double,
-        pageHeight: Double,
-        baseUrl: String?
-    ) -> [MediaSlot]? {
-        let ids = (visibleMediaIds as? [Any])?.compactMap { $0 as? String } ?? []
-        var slots: [MediaSlot] = []
-        let width = pageWidth > 0 ? pageWidth : 1
-        let height = pageHeight > 0 ? pageHeight : 1
-        for mediaId in ids {
-            guard let entry = catalog[mediaId] else { continue }
-            guard let placement = entry.placements.first(where: { item in
-                guard (item["slideIndex"] as? NSNumber)?.intValue == slideIndex else { return false }
-                let visible = item["visibleSteps"] as? [Any]
-                if visible == nil || visible?.isEmpty == true { return true }
-                return visible?.contains(where: { ($0 as? NSNumber)?.intValue == stepIndex }) == true
-            }) else { continue }
-            guard let url = resolveAssetUrl(entry.src, baseUrl: baseUrl) else { return nil }
-            var poster: String?
-            if let rawPoster = entry.poster {
-                guard let resolved = resolveAssetUrl(rawPoster, baseUrl: baseUrl) else { return nil }
-                poster = resolved
-            }
-            slots.append(
-                MediaSlot(
-                    mediaId: mediaId,
-                    type: entry.type,
-                    url: url,
-                    rect: [
-                        "x": ((placement["x"] as? NSNumber)?.doubleValue ?? 0) * width,
-                        "y": ((placement["y"] as? NSNumber)?.doubleValue ?? 0) * height,
-                        "width": ((placement["width"] as? NSNumber)?.doubleValue ?? 0) * width,
-                        "height": ((placement["height"] as? NSNumber)?.doubleValue ?? 0) * height,
-                    ],
-                    poster: poster
-                )
-            )
-        }
-        return slots
     }
 
     private static func formatFromUrl(_ url: String) -> String {

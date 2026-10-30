@@ -1427,17 +1427,31 @@ final class DrawsKitEngine {
         })
     }
 
-    func addTranscodeFile(_ manifest: Any, baseUrl: String? = nil) -> String {
-        switch CoursewareMap.parseManifest(manifest, baseUrl: baseUrl) {
-        case .failure(let error):
-            emit(DrawsKitConstants.EVENT.DK_WARNING, [[
-                "code": DrawsKitConstants.WarningCode.DRAWSKIT_WARNING_ILLEGAL_OPERATION,
-                "message": CoursewareMap.errorMessage(error),
-            ]])
-            return ""
-        case .ok(let payload):
-            return loadStaticCourseware(payload)
+    @MainActor
+    func addTranscodeFile(_ manifest: Any, baseUrl: String? = nil, title: String? = nil) async throws -> String {
+        guard !destroyed, let target = session else {
+            throw NSError(domain: "DrawsKit.Manifest", code: 2, userInfo: [NSLocalizedDescriptionKey: "DrawsKit session is unavailable"])
         }
+        let payload: CoursewarePayload = try await withCheckedThrowingContinuation { continuation in
+            engineCallbackQueue.async {
+                continuation.resume(with: Result { try CoursewareMap.parseManifest(manifest, baseUrl: baseUrl, title: title) })
+            }
+        }
+        guard !destroyed, session === target else { throw CancellationError() }
+        coursewareLoading?.show(message: "课件加载中…")
+        let accepted: Bool = await withCheckedContinuation { continuation in
+            engineCallbackQueue.async {
+                continuation.resume(returning: target.send(json: PlatformEvents.loadCourseware(payload)) == 0)
+            }
+        }
+        guard !destroyed, session === target else { throw CancellationError() }
+        guard accepted else {
+            coursewareLoading?.hide()
+            throw NSError(domain: "DrawsKit.Manifest", code: 3, userInfo: [NSLocalizedDescriptionKey: "load_courseware rejected"])
+        }
+        currentCoursewareFileId = payload.fileId
+        emit(DrawsKitConstants.EVENT.DK_ADDTRANSCODEFILE, [["fileId": payload.fileId]])
+        return payload.fileId
     }
 
     func addImagesFile(_ urls: [String], title: String?) -> String {
@@ -1838,6 +1852,21 @@ final class DrawsKitEngine {
         send(PlatformEvents.withType(PlatformEventType.copyElements) { payload in
             payload["ids"] = ids
             payload["timestamp"] = Int(Date().timeIntervalSince1970 * 1000)
+        })
+    }
+    func removeElementsByIds(_ ids: [String]) {
+        send(PlatformEvents.withType(PlatformEventType.removeElements) { payload in
+            payload["ids"] = ids; payload["timestamp"] = Int(Date().timeIntervalSince1970 * 1000)
+        })
+    }
+    func lockElements(_ ids: [String], _ locked: Bool) {
+        send(PlatformEvents.withType(PlatformEventType.setElementsLocked) { payload in
+            payload["ids"] = ids; payload["locked"] = locked; payload["timestamp"] = Int(Date().timeIntervalSince1970 * 1000)
+        })
+    }
+    func reorderElements(_ ids: [String], _ placement: String) {
+        send(PlatformEvents.withType(PlatformEventType.reorderElements) { payload in
+            payload["ids"] = ids; payload["placement"] = placement; payload["timestamp"] = Int(Date().timeIntervalSince1970 * 1000)
         })
     }
     func getSelectedElementIds() -> [String] { SessionRead.getSelectedIds(lastFrame) }

@@ -2,10 +2,10 @@
 import Foundation
 
 enum ProtocolVersions {
-    static let sceneDelta = 1
-    static let renderMessage = 1
-    static let syncEnvelope = 1
+    static let sceneDelta = 2
+    static let renderMessage = 2
+    static let syncEnvelope = 2
     static let liveStrokeEnvelope = 3
-    static let documentExport = 1
-    static let workspaceExport = 1
+    static let documentExport = 2
+    static let workspaceExport = 2
 }

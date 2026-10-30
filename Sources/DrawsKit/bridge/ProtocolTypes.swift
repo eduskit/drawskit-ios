@@ -31,7 +31,7 @@ struct SyncEnvelopePayload {
         }
         guard let raw else { return nil }
         guard let schema = (raw["schema_version"] as? NSNumber)?.intValue,
-              schema == 1,
+              schema == 2,
               let seq = (raw["seq"] as? NSNumber)?.int64Value,
               let boardId = raw["board_id"] as? String,
               let op = raw["op"] as? [String: Any],
@@ -137,7 +137,7 @@ struct SceneDeltaPayload {
 
     static func parse(_ raw: [String: Any]) -> SceneDeltaPayload? {
         guard let schema = (raw["schema_version"] as? NSNumber)?.intValue,
-              schema == 1,
+              schema == 2,
               let baseVersion = (raw["base_version"] as? NSNumber)?.intValue,
               let version = (raw["version"] as? NSNumber)?.intValue,
               let fullSnapshot = raw["full_snapshot"] as? Bool else { return nil }
@@ -168,7 +168,7 @@ struct WorkspaceExportPayload {
 
     static func parse(_ raw: [String: Any]) -> WorkspaceExportPayload? {
         guard let schema = (raw["schema_version"] as? NSNumber)?.intValue,
-              schema == 1,
+              schema == 2,
               let roomId = raw["room_id"] as? String,
               let checkpointSeq = (raw["checkpoint_seq"] as? NSNumber)?.int64Value,
               raw["created_at"] is NSNumber,

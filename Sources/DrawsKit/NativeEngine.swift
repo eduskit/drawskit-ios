@@ -5,6 +5,9 @@ typealias WbSyncCallback = @convention(c) (UnsafePointer<CChar>?, Int) -> Void
 /// Volatile in-progress ink; fan out over IM only, never persist or retry.
 typealias WbLiveStrokeCallback = @convention(c) (UnsafePointer<CChar>?, Int) -> Void
 
+@_silgen_name("wb_courseware_parse_manifest_json")
+private func wb_courseware_parse_manifest_json(_ manifest: UnsafePointer<CChar>?, _ base: UnsafePointer<CChar>?, _ title: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+
 @_silgen_name("wb_engine_get_version")
 private func wb_engine_get_version() -> UnsafePointer<CChar>?
 
@@ -221,6 +224,19 @@ public struct EngineSmokeResult {
 
 /// FFI bridge to `libwhiteboard_ffi` (see `pnpm build:ios:ffi`).
 public enum NativeEngine {
+    static func parseCoursewareManifestJson(_ manifest: String, baseUrl: String?, title: String?) throws -> Data {
+        precondition(!Thread.isMainThread, "Manifest parsing requires a worker")
+        let result = manifest.withCString { input in
+            (baseUrl ?? "").withCString { base in
+                (title ?? "").withCString { title in wb_courseware_parse_manifest_json(input, base, title) }
+            }
+        }
+        guard let result else { throw NSError(domain: "DrawsKit.Manifest", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Manifest parser unavailable"]) }
+        defer { wb_engine_free_string(result) }
+        return Data(bytes: result, count: strlen(result))
+    }
+
     public static var isLibLoaded: Bool {
         wb_engine_get_version() != nil
     }

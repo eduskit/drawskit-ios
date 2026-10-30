@@ -31,7 +31,7 @@ final class MediaHost {
     func sync(_ frame: [String: Any]?) {
         let wanted = collectWanted(frame)
         let keep = Set(wanted.map(\.key))
-        for (key, player) in players where !keep.contains(key) && !player.global {
+        for (key, player) in players where !keep.contains(key) {
             player.release()
             players.removeValue(forKey: key)
         }
@@ -136,6 +136,7 @@ final class MediaHost {
                 let url = shape.string("url")
                 let bounds = shape.dict("bounds")
                 let global = shape["global"] as? Bool ?? false
+                if global { continue }
                 wanted.append(Wanted(
                     key: MediaDefaults.elementKey(id),
                     kind: MediaDefaults.kindAudio,
@@ -152,6 +153,14 @@ final class MediaHost {
                     mediaId: id,
                     global: global
                 ))
+            }
+        }
+        if let session = frame["session"] as? [String: Any],
+           let audio = session["global_audio"] as? [[String: Any]] {
+            for entry in audio {
+                guard let id = entry["element_id"] as? String, let url = entry["url"] as? String else { continue }
+                wanted.append(Wanted(key: MediaDefaults.elementKey(id), kind: MediaDefaults.kindAudio,
+                                     url: url, rect: nil, mediaId: id, global: true))
             }
         }
         return wanted
