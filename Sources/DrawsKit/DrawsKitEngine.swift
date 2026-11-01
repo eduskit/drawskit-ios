@@ -2,6 +2,9 @@ import UIKit
 
 /// Rust engine wiring: PlatformEvent JSON → FFI → RenderMessage → [DrawsKitView].
 final class DrawsKitEngine {
+    /// Half a point absorbs Float to CGFloat rounding when the placement fills the view.
+    private static let placementSlack: CGFloat = 0.5
+
     let initParams: DrawsKitInitParams
     private let emit: (String, [Any]) -> Void
 
@@ -14,6 +17,10 @@ final class DrawsKitEngine {
     private var bootstrapError: Error?
 
     private var lastFrame: [String: Any]?
+    /// Last committed frame that carries a courseware image. Transient frames do not replace it.
+    private var committedCoursewareFrame: [String: Any]?
+    private var pendingCoursewareStatus: [CoursewareStatusEvent] = []
+    private var coursewareFramePublished = false
     private var drawEnabled = false
     private var serverCanDraw = true
     private var requestedDrawEnabled = true
@@ -57,9 +64,11 @@ final class DrawsKitEngine {
     let operationLogger: OperationLogger
 
     private lazy var imageCache = ImageCache(
-        onLoaded: { [weak self] in
+        onLoaded: { [weak self] url in
             DispatchQueue.main.async {
-                guard let self, let renderer = self.renderer, let frame = self.lastFrame else { return }
+                guard let self, let renderer = self.renderer,
+                      let frame = self.committedCoursewareFrame,
+                      CoursewareRead.getCoursewareLayer(frame)?.string("image_url") == url else { return }
                 renderer.prepareSharedVectorLayer(frame: frame)
             }
         },
@@ -81,45 +90,10 @@ final class DrawsKitEngine {
             )
         },
         onCoursewareStatus: { [weak self] event in
-            guard let self else { return }
-            let layer = CoursewareRead.getCoursewareLayer(self.lastFrame)
-            let fileId = layer?.string("resource_id").isEmpty == false
-                ? layer!.string("resource_id")
-                : (self.currentCoursewareFileId ?? "")
-            let pageIndex: Int = {
-                if layer?.string("image_url") == event.url {
-                    return layer?.int("page_index") ?? 0
-                }
-                return self.pageIndexForUrl(event.url, fileId: fileId)
-            }()
-            self.emit(
-                DrawsKitConstants.EVENT.DK_COURSEWARE_STATUS_CHANGED,
-                [[
-                    "id": self.initParams.id,
-                    "fileId": fileId,
-                    "pageIndex": pageIndex,
-                    "status": event.status,
-                    "reason": event.reason as Any,
-                    "quality": event.quality as Any,
-                ]]
-            )
-            if event.status == "error", !fileId.isEmpty {
-                self.syncCoordinator?.onCoursewareAssetFailed(
-                    fileId: fileId,
-                    url: event.url,
-                    reason: event.reason ?? ""
-                )
-            }
-            let layerUrl = layer?.string("image_url")
-            let visiblePage = layer?.int("page_index") ?? 0
-            let isVisible =
-                event.url == layerUrl ||
-                pageIndex == visiblePage ||
-                ((layerUrl == nil || layerUrl?.isEmpty == true) && pageIndex == 0)
-            if event.status == "loading", isVisible {
-                self.coursewareLoading?.show(message: "课件加载中…（第 \(pageIndex + 1) 步）")
-            } else if event.status == "ready" || event.status == "error" {
-                self.coursewareLoading?.hide()
+            DispatchQueue.main.async {
+                guard let self, !self.destroyed else { return }
+                self.pendingCoursewareStatus.append(event)
+                if self.coursewareFramePublished { self.drainCoursewareStatus() }
             }
         },
         onPerformance: { [weak self] event in
@@ -760,6 +734,7 @@ final class DrawsKitEngine {
         // detach 期间无 renderer：跳过绘制与 UI 同步事件。
         guard let renderer else { return }
         let frame = renderer.materialize(rawFrame)
+        rememberCommittedCourseware(frame)
         renderer.prepareSharedVectorLayer(frame: frame)
         if let delta = rawFrame["scene_delta"] as? [String: Any] {
             let upserts = (delta["upserts"] as? [Any])?.count ?? 0
@@ -788,6 +763,8 @@ final class DrawsKitEngine {
             } else {
                 self.lastFrame = frame
             }
+            self.coursewareFramePublished = true
+            self.drainCoursewareStatus()
             self.syncViewportEvents(frame)
             if let requested = self.requestedToolKind,
                SessionRead.getActiveToolKind(frame) == requested {
@@ -809,6 +786,12 @@ final class DrawsKitEngine {
 
     private func invalidateDirty(_ frame: [String: Any]) {
         guard let view else { return }
+        // Dirty rects are in the frame's viewport. A letterboxed bitmap is not
+        // in that space, so a partial redraw would miss the ink on screen.
+        if !displayedPlacementCovers(view) {
+            view.setNeedsDisplay()
+            return
+        }
         guard let viewport = frame.dict("viewport"),
               let dirty = frame["dirty_rects"] as? [[String: Any]] else {
             view.setNeedsDisplay()
@@ -1020,7 +1003,7 @@ final class DrawsKitEngine {
         }
         let samples: [[String: Any]] = touches.map { sample in
             let location = sample.location(in: view)
-            let (sx, sy) = ViewportCoords.touchToScreen(view: view, x: location.x, y: location.y)
+            let (sx, sy) = viewLocationToViewport(x: location.x, y: location.y, in: view)
             let (wx, wy) = screenToWorld(screenX: sx, screenY: sy)
             var pressure = sample.force > 0 ? Float(sample.force / sample.maximumPossibleForce) : 0.5
             pressure = min(max(pressure, 0), 1)
@@ -1057,7 +1040,7 @@ final class DrawsKitEngine {
         guard canForwardPointer() else { return }
 
         let location = touch.location(in: view)
-        let (sx, sy) = ViewportCoords.touchToScreen(view: view, x: location.x, y: location.y)
+        let (sx, sy) = viewLocationToViewport(x: location.x, y: location.y, in: view)
         let (wx, wy) = screenToWorld(screenX: sx, screenY: sy)
         var pressure = touch.force > 0 ? Float(touch.force / touch.maximumPossibleForce) : 0.5
         pressure = min(max(pressure, 0), 1)
@@ -1092,7 +1075,7 @@ final class DrawsKitEngine {
 
     private func handlePanTouch(phase: TouchPhase, touch: UITouch, in view: DrawsKitView) {
         let location = touch.location(in: view)
-        let (sx, sy) = ViewportCoords.touchToScreen(view: view, x: location.x, y: location.y)
+        let (sx, sy) = viewLocationToViewport(x: location.x, y: location.y, in: view)
         switch phase {
         case .began:
             panDragOrigin = (sx, sy)
@@ -1153,7 +1136,7 @@ final class DrawsKitEngine {
 
     func onPinch(scaleFactor: Float, focusX: Float, focusY: Float, in view: DrawsKitView) {
         guard !destroyed, drawEnabled, enableScaleTool else { return }
-        let (sx, sy) = ViewportCoords.touchToScreen(view: view, x: CGFloat(focusX), y: CGFloat(focusY))
+        let (sx, sy) = viewLocationToViewport(x: CGFloat(focusX), y: CGFloat(focusY), in: view)
         send(PlatformEvents.zoomAtPoint(screenX: sx, screenY: sy, scaleFactor: scaleFactor))
     }
 
@@ -1169,7 +1152,7 @@ final class DrawsKitEngine {
         guard phase == .began else { return }
         if textOverlay != nil { return }
         let location = touch.location(in: view)
-        let (sx, sy) = ViewportCoords.touchToScreen(view: view, x: location.x, y: location.y)
+        let (sx, sy) = viewLocationToViewport(x: location.x, y: location.y, in: view)
         let (wx, wy) = screenToWorld(screenX: sx, screenY: sy)
         if let existing = TextMap.parseTextEditHit(session?.textAtPointJson(x: wx, y: wy)) {
             openTextInput(
@@ -1205,7 +1188,7 @@ final class DrawsKitEngine {
 
         let transform = ViewportCoords.transform(frame: lastFrame)
         let (screenX, screenY) = ViewportCoords.worldToScreen(worldX: worldX, worldY: worldY, transform: transform)
-        let (overlayX, overlayY) = ViewportCoords.screenToViewPixels(view: view, screenX: screenX, screenY: screenY)
+        let (overlayX, overlayY) = viewportPointToView(x: screenX, y: screenY, in: view)
 
         emit(DrawsKitConstants.EVENT.DK_TEXT_ELEMENT_STATUS_CHANGED, [[
             "status": "editing",
@@ -1286,6 +1269,79 @@ final class DrawsKitEngine {
     private func screenToWorld(screenX: Float, screenY: Float) -> (Float, Float) {
         let transform = ViewportCoords.transform(frame: lastFrame)
         return ViewportCoords.screenToWorld(screenX: screenX, screenY: screenY, transform: transform)
+    }
+
+    /// View point → logical viewport of the bitmap on screen, then `screenToWorld`.
+    private func viewLocationToViewport(x: CGFloat, y: CGFloat, in view: UIView) -> (Float, Float) {
+        let (rawX, rawY) = ViewportCoords.touchToScreen(view: view, x: x, y: y)
+        let source = displayedViewportSize(in: view)
+        let placed = viewportPlacement(of: source, in: view)
+        return ViewportPlacement.viewPointToSource(
+            viewX: rawX,
+            viewY: rawY,
+            placed: placed,
+            sourceWidth: source.width,
+            sourceHeight: source.height
+        )
+    }
+
+    private func viewportPointToView(x: Float, y: Float, in view: UIView) -> (CGFloat, CGFloat) {
+        let source = displayedViewportSize(in: view)
+        let placed = viewportPlacement(of: source, in: view)
+        let point = ViewportPlacement.sourcePointToView(
+            sourceX: x,
+            sourceY: y,
+            placed: placed,
+            sourceWidth: source.width,
+            sourceHeight: source.height
+        )
+        return (CGFloat(point.0), CGFloat(point.1))
+    }
+
+    private func viewportPlacement(
+        of source: (width: Float, height: Float),
+        in view: UIView
+    ) -> ContainedViewport {
+        ViewportPlacement.contain(
+            sourceWidth: source.width,
+            sourceHeight: source.height,
+            destWidth: Float(view.bounds.width),
+            destHeight: Float(view.bounds.height)
+        )
+    }
+
+    /// Committed packet bounds, otherwise the frame viewport. Same size the bitmap was drawn with.
+    private func displayedViewportSize(in view: UIView) -> (width: Float, height: Float) {
+        if let size = renderer?.displayedLogicalViewport(), size.width > 0, size.height > 0 {
+            return (Float(size.width), Float(size.height))
+        }
+        let viewport = lastFrame?.dict("viewport")
+        let width = Float(viewport?.double("width") ?? 0)
+        let height = Float(viewport?.double("height") ?? 0)
+        if width > 0, height > 0 {
+            return (width, height)
+        }
+        return (Float(max(view.bounds.width, 1)), Float(max(view.bounds.height, 1)))
+    }
+
+    private func displayedPlacementCovers(_ view: UIView) -> Bool {
+        guard let size = renderer?.displayedLogicalViewport(),
+              size.width > 0,
+              size.height > 0,
+              view.bounds.width > 0,
+              view.bounds.height > 0
+        else { return true }
+        let placed = ViewportPlacement.contain(
+            sourceWidth: Float(size.width),
+            sourceHeight: Float(size.height),
+            destWidth: Float(view.bounds.width),
+            destHeight: Float(view.bounds.height)
+        )
+        let slack = Self.placementSlack
+        return abs(CGFloat(placed.x)) <= slack
+            && abs(CGFloat(placed.y)) <= slack
+            && abs(CGFloat(placed.width) - view.bounds.width) <= slack
+            && abs(CGFloat(placed.height) - view.bounds.height) <= slack
     }
 
     func destroy() {
@@ -1582,9 +1638,69 @@ final class DrawsKitEngine {
         )
     }
 
-    private func pageIndexForUrl(_ url: String, fileId: String) -> Int {
+    private func rememberCommittedCourseware(_ frame: [String: Any]) {
+        if (frame["render_message_type"] as? String) == RenderDefaults.renderMessageTransient { return }
+        guard let layer = CoursewareRead.getCoursewareLayer(frame),
+              !layer.string("image_url").isEmpty else { return }
+        committedCoursewareFrame = frame
+    }
+
+    private func coursewareStatusFrame() -> [String: Any]? {
+        committedCoursewareFrame ?? lastFrame
+    }
+
+    private func drainCoursewareStatus() {
+        let events = pendingCoursewareStatus
+        pendingCoursewareStatus.removeAll()
+        for event in events { handleCoursewareStatus(event) }
+    }
+
+    private func handleCoursewareStatus(_ event: CoursewareStatusEvent) {
+        let frame = coursewareStatusFrame()
+        let layer = CoursewareRead.getCoursewareLayer(frame)
+        let fileId = layer?.string("resource_id").isEmpty == false
+            ? layer!.string("resource_id")
+            : (currentCoursewareFileId ?? "")
+        let pageIndex: Int = {
+            if layer?.string("image_url") == event.url {
+                return layer?.int("page_index") ?? 0
+            }
+            return pageIndexForUrl(event.url, fileId: fileId, frame: frame)
+        }()
+        emit(
+            DrawsKitConstants.EVENT.DK_COURSEWARE_STATUS_CHANGED,
+            [[
+                "id": initParams.id,
+                "fileId": fileId,
+                "pageIndex": pageIndex,
+                "status": event.status,
+                "reason": event.reason as Any,
+                "quality": event.quality as Any,
+            ]]
+        )
+        if event.status == "error", !fileId.isEmpty {
+            syncCoordinator?.onCoursewareAssetFailed(
+                fileId: fileId,
+                url: event.url,
+                reason: event.reason ?? ""
+            )
+        }
+        let layerUrl = layer?.string("image_url")
+        let visiblePage = layer?.int("page_index") ?? 0
+        let isVisible =
+            event.url == layerUrl ||
+            pageIndex == visiblePage ||
+            ((layerUrl == nil || layerUrl?.isEmpty == true) && pageIndex == 0)
+        if event.status == "loading", isVisible {
+            coursewareLoading?.show(message: "课件加载中…（第 \(pageIndex + 1) 步）")
+        } else if event.status == "ready" || event.status == "error" {
+            coursewareLoading?.hide()
+        }
+    }
+
+    private func pageIndexForUrl(_ url: String, fileId: String, frame: [String: Any]?) -> Int {
         guard !fileId.isEmpty else { return 0 }
-        let urls = CoursewareRead.getThumbnailImages(lastFrame, fileId: fileId)
+        let urls = CoursewareRead.getThumbnailImages(frame, fileId: fileId)
         return urls.firstIndex(of: url) ?? 0
     }
 

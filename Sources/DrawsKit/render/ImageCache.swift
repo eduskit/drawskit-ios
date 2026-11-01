@@ -32,7 +32,7 @@ final class ImageCache {
     private static let fetchRequestTimeout: TimeInterval =
         TimeInterval(SyncPolicy.coursewareRefreshHttpTimeoutMs) / 1_000
 
-    private let onLoaded: () -> Void
+    private let onLoaded: (String) -> Void
     private let onError: (String, String) -> Void
     private let onWaitingForSignedUrl: (String) -> Void
     private let onCoursewareStatus: (CoursewareStatusEvent) -> Void
@@ -55,22 +55,44 @@ final class ImageCache {
     private let stateQueue = DispatchQueue(label: "io.drawskit.image-cache.state", qos: .userInitiated)
     private var pendingJobs: [RasterJob] = []
     private var rasterActive = false
+    private var activeJob: RasterJob?
 
-    private struct RasterJob {
+    /// Reference type so a visible-page promotion can flip `notifyStatus` on the job already running.
+    private final class RasterJob {
         let url: String
         let key: String
         let width: UInt32
         let height: UInt32
-        let priority: Int
+        var priority: Int
         let quality: String
         let order: Int
-        let notifyStatus: Bool
+        var notifyStatus: Bool
+
+        init(
+            url: String,
+            key: String,
+            width: UInt32,
+            height: UInt32,
+            priority: Int,
+            quality: String,
+            order: Int,
+            notifyStatus: Bool
+        ) {
+            self.url = url
+            self.key = key
+            self.width = width
+            self.height = height
+            self.priority = priority
+            self.quality = quality
+            self.order = order
+            self.notifyStatus = notifyStatus
+        }
     }
 
     private var jobOrder = 0
 
     init(
-        onLoaded: @escaping () -> Void,
+        onLoaded: @escaping (String) -> Void,
         onError: @escaping (String, String) -> Void = { _, _ in },
         onWaitingForSignedUrl: @escaping (String) -> Void = { _ in },
         onCoursewareStatus: @escaping (CoursewareStatusEvent) -> Void = { _ in },
@@ -157,12 +179,20 @@ final class ImageCache {
             return
         }
         let key = Self.cacheKey(url, width: svg ? width : 0, height: svg ? height : 0)
-        let shouldStart: Bool = stateQueue.sync {
-            if failedUrls[url] != nil || cache[key] != nil || loading.contains(key) { return false }
+        let start: LoadStart = stateQueue.sync {
+            if failedUrls[url] != nil || cache[key] != nil { return .skip }
+            if loading.contains(key) {
+                if notifyStatus { markVisibleLocked(url) }
+                return notifyStatus ? .alreadyLoading : .skip
+            }
             loading.insert(key)
-            return true
+            return .start
         }
-        guard shouldStart else { return }
+        if start == .alreadyLoading {
+            emitLoading(url)
+            return
+        }
+        guard start == .start else { return }
 
         if !svg {
             guard let remote = URL(string: url) else {
@@ -189,7 +219,7 @@ final class ImageCache {
                     return
                 }
                 self.stateQueue.sync { self.setBitmap(key, image) }
-                DispatchQueue.main.async { self.onLoaded() }
+                DispatchQueue.main.async { self.onLoaded(url) }
             }
             return
         }
@@ -319,12 +349,30 @@ final class ImageCache {
         }
     }
 
+    /// Visible URL jumps the queue and reports status, including the job already running.
     private func promoteVisiblePage(_ url: String) {
-        stateQueue.sync {
-            let stale = pendingJobs.filter { $0.url == url && $0.priority > 0 }
-            pendingJobs.removeAll { $0.url == url && $0.priority > 0 }
-            for job in stale { loading.remove(job.key) }
+        stateQueue.sync { markVisibleLocked(url) }
+    }
+
+    /// Caller holds `stateQueue`.
+    private func markVisibleLocked(_ url: String) {
+        for job in pendingJobs where job.url == url {
+            job.priority = 0
+            job.notifyStatus = true
         }
+        if activeJob?.url == url {
+            activeJob?.notifyStatus = true
+        }
+        pendingJobs.sort {
+            if $0.priority != $1.priority { return $0.priority < $1.priority }
+            return $0.order < $1.order
+        }
+    }
+
+    private enum LoadStart {
+        case start
+        case skip
+        case alreadyLoading
     }
 
     func release() {
@@ -396,6 +444,7 @@ final class ImageCache {
             guard !rasterActive, let next = pendingJobs.first else { return nil }
             pendingJobs.removeFirst()
             rasterActive = true
+            activeJob = next
             return next
         }
         guard let job else { return }
@@ -407,16 +456,22 @@ final class ImageCache {
     }
 
     private func runRasterJob(_ job: RasterJob) {
-        defer { stateQueue.sync { _ = loading.remove(job.key) } }
+        defer {
+            stateQueue.sync {
+                _ = loading.remove(job.key)
+                if activeJob === job { activeJob = nil }
+            }
+        }
+        let notify = { self.stateQueue.sync { job.notifyStatus } }
 
         if stateQueue.sync(execute: { cache[job.key] != nil }) {
-            if job.notifyStatus { emitReady(job.url, quality: job.quality) }
+            if notify() { emitReady(job.url, quality: job.quality) }
             return
         }
 
         guard let remote = URL(string: job.url) else {
             report(job.url, "malformed url")
-            if job.notifyStatus { emitError(job.url, "malformed url") }
+            if notify() { emitError(job.url, "malformed url") }
             return
         }
 
@@ -431,11 +486,11 @@ final class ImageCache {
                 stateQueue.sync { setSvgBytes(job.url, fetched) }
                 emitPerformance(job, phase: "fetch", startedAt: startedAt)
             } catch {
-                if rememberRefreshWait(job.url, error: error, notifyStatus: job.notifyStatus) { return }
+                if rememberRefreshWait(job.url, error: error, notifyStatus: notify()) { return }
                 let reason = error.localizedDescription
                 rememberTerminalFailure(job.url, reason: reason)
                 report(job.url, reason)
-                if job.notifyStatus { emitError(job.url, reason) }
+                if notify() { emitError(job.url, reason) }
                 return
             }
         }
@@ -443,20 +498,20 @@ final class ImageCache {
         let rasterStartedAt = CFAbsoluteTimeGetCurrent()
         guard let png = NativeEngine.rasterizeCoursewareSvg(data, width: job.width, height: job.height) else {
             report(job.url, "page is not renderable SVG")
-            if job.notifyStatus { emitError(job.url, "page is not renderable SVG") }
+            if notify() { emitError(job.url, "page is not renderable SVG") }
             return
         }
         emitPerformance(job, phase: "raster", startedAt: rasterStartedAt)
         let decodeStartedAt = CFAbsoluteTimeGetCurrent()
         guard let image = UIImage(data: png) else {
             report(job.url, "image could not be decoded")
-            if job.notifyStatus { emitError(job.url, "image could not be decoded") }
+            if notify() { emitError(job.url, "image could not be decoded") }
             return
         }
         emitPerformance(job, phase: "decode", startedAt: decodeStartedAt)
         stateQueue.sync { setBitmap(job.key, image) }
-        if job.notifyStatus { emitReady(job.url, quality: job.quality) }
-        DispatchQueue.main.async { self.onLoaded() }
+        if notify() { emitReady(job.url, quality: job.quality) }
+        DispatchQueue.main.async { self.onLoaded(job.url) }
     }
 
     private func emitPerformance(_ job: RasterJob, phase: String, startedAt: CFAbsoluteTime) {

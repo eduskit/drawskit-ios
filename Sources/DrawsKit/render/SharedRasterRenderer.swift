@@ -321,21 +321,23 @@ final class SharedRasterRenderer {
         }
     }
 
+    /// Logical viewport of the bitmap currently on screen. Committed packet first.
+    func displayedLogicalViewport() -> CGSize? {
+        let packet = preparedPacket ?? transientPacket
+        guard let packet, packet.bounds.width > 0, packet.bounds.height > 0 else { return nil }
+        return packet.bounds.size
+    }
+
     func render(in context: CGContext) {
-        // Always compose into the visible surface. `packet.bounds` is the
-        // logical viewport used to compile the frame (default 1280×720, or a
-        // stale reparent size). Drawing that rect 1:1 on a phone 16:9 slot
-        // (≈402×226) makes the courseware larger than the whiteboard and
-        // clips the right edge. Android already dest-rects to host size.
-        let surface = host?.bounds
-        let dest: CGRect
-        if let surface, surface.width > 0, surface.height > 0 {
-            dest = surface
-        } else {
-            dest = preparedPacket?.bounds ?? transientPacket?.bounds ?? .zero
-        }
-        guard dest.width > 0, dest.height > 0 else { return }
+        _ = context
+        // Each packet keeps the aspect it was rasterized with. A stale taller
+        // viewport is letterboxed in the slot; it is not stretched per axis.
+        // `wb_contain_viewport` is pure placement math (no engine, lock, or I/O).
+        let surface = host?.bounds ?? .zero
+        guard surface.width > 0, surface.height > 0 else { return }
         for packet in [preparedPacket, transientPacket].compactMap({ $0 }) {
+            let dest = Self.placement(of: packet, in: surface)
+            guard dest.width > 0, dest.height > 0 else { continue }
             // UIView.draw(_:) supplies a UIKit context whose CTM already owns
             // device scale and Y-axis conversion. A second manual translate /
             // flip makes packet placement depend on the Retina CTM and crops
@@ -347,6 +349,21 @@ final class SharedRasterRenderer {
                 orientation: .up
             ).draw(in: dest)
         }
+    }
+
+    private static func placement(of packet: RenderPacket, in surface: CGRect) -> CGRect {
+        let placed = ViewportPlacement.contain(
+            sourceWidth: Float(packet.bounds.width),
+            sourceHeight: Float(packet.bounds.height),
+            destWidth: Float(surface.width),
+            destHeight: Float(surface.height)
+        )
+        return CGRect(
+            x: CGFloat(placed.x),
+            y: CGFloat(placed.y),
+            width: CGFloat(placed.width),
+            height: CGFloat(placed.height)
+        )
     }
 
     func destroy() {

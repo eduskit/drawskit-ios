@@ -12,6 +12,8 @@ final class MediaHost {
     private var showAudioControl = false
     private var pptAudioControls = false
     private var pptMuted = false
+    private var viewportWidth: Float = 0
+    private var viewportHeight: Float = 0
     var onVideoStatus: (([String: Any]) -> Void)?
     var onAudioStatus: (([String: Any]) -> Void)?
 
@@ -29,6 +31,9 @@ final class MediaHost {
     }
 
     func sync(_ frame: [String: Any]?) {
+        let viewport = frame?.dict("viewport")
+        viewportWidth = Float(viewport?.double("width") ?? 0)
+        viewportHeight = Float(viewport?.double("height") ?? 0)
         let wanted = collectWanted(frame)
         let keep = Set(wanted.map(\.key))
         for (key, player) in players where !keep.contains(key) {
@@ -83,13 +88,35 @@ final class MediaHost {
             return
         }
         view.isHidden = false
-        let origin = ViewportCoords.screenToViewPixels(view: drawsKitView, screenX: rect.x, screenY: rect.y)
-        let corner = ViewportCoords.screenToViewPixels(
-            view: drawsKitView,
-            screenX: rect.x + rect.width,
-            screenY: rect.y + rect.height
-        )
+        let origin = viewportPointToView(rect.x, rect.y)
+        let corner = viewportPointToView(rect.x + rect.width, rect.y + rect.height)
         view.frame = CGRect(x: origin.0, y: origin.1, width: corner.0 - origin.0, height: corner.1 - origin.1)
+    }
+
+    /// Screen rects are in the frame viewport. Place them with the same contain the bitmap uses.
+    private func viewportPointToView(_ x: Float, _ y: Float) -> (CGFloat, CGFloat) {
+        guard let view = drawsKitView,
+              viewportWidth > 0,
+              viewportHeight > 0,
+              view.bounds.width > 0,
+              view.bounds.height > 0
+        else {
+            return ViewportCoords.screenToViewPixels(view: drawsKitView, screenX: x, screenY: y)
+        }
+        let placed = ViewportPlacement.contain(
+            sourceWidth: viewportWidth,
+            sourceHeight: viewportHeight,
+            destWidth: Float(view.bounds.width),
+            destHeight: Float(view.bounds.height)
+        )
+        let point = ViewportPlacement.sourcePointToView(
+            sourceX: x,
+            sourceY: y,
+            placed: placed,
+            sourceWidth: viewportWidth,
+            sourceHeight: viewportHeight
+        )
+        return (CGFloat(point.0), CGFloat(point.1))
     }
 
     private func applyPointerPolicy() {

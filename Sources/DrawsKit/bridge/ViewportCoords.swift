@@ -1,5 +1,82 @@
 import UIKit
 
+@_silgen_name("wb_contain_viewport")
+private func wb_contain_viewport(
+    _ sourceWidth: Float,
+    _ sourceHeight: Float,
+    _ destWidth: Float,
+    _ destHeight: Float,
+    _ outX: UnsafeMutablePointer<Float>?,
+    _ outY: UnsafeMutablePointer<Float>?,
+    _ outWidth: UnsafeMutablePointer<Float>?,
+    _ outHeight: UnsafeMutablePointer<Float>?
+)
+
+/// Placement returned by Core. Callers apply this rect; they do not recompute the scale.
+struct ContainedViewport {
+    var x: Float
+    var y: Float
+    var width: Float
+    var height: Float
+}
+
+enum ViewportPlacement {
+    static func contain(
+        sourceWidth: Float,
+        sourceHeight: Float,
+        destWidth: Float,
+        destHeight: Float
+    ) -> ContainedViewport {
+        var x: Float = 0
+        var y: Float = 0
+        var width: Float = 0
+        var height: Float = 0
+        wb_contain_viewport(
+            sourceWidth,
+            sourceHeight,
+            destWidth,
+            destHeight,
+            &x,
+            &y,
+            &width,
+            &height
+        )
+        return ContainedViewport(x: x, y: y, width: width, height: height)
+    }
+
+    static func viewPointToSource(
+        viewX: Float,
+        viewY: Float,
+        placed: ContainedViewport,
+        sourceWidth: Float,
+        sourceHeight: Float
+    ) -> (Float, Float) {
+        guard placed.width > 0, placed.height > 0, sourceWidth > 0, sourceHeight > 0 else {
+            return (viewX, viewY)
+        }
+        return (
+            (viewX - placed.x) / placed.width * sourceWidth,
+            (viewY - placed.y) / placed.height * sourceHeight
+        )
+    }
+
+    static func sourcePointToView(
+        sourceX: Float,
+        sourceY: Float,
+        placed: ContainedViewport,
+        sourceWidth: Float,
+        sourceHeight: Float
+    ) -> (Float, Float) {
+        guard placed.width > 0, placed.height > 0, sourceWidth > 0, sourceHeight > 0 else {
+            return (sourceX, sourceY)
+        }
+        return (
+            placed.x + sourceX / sourceWidth * placed.width,
+            placed.y + sourceY / sourceHeight * placed.height
+        )
+    }
+}
+
 enum ViewportCoords {
     struct Transform {
         let offsetX: Float
