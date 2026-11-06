@@ -38,6 +38,7 @@ struct SyncEnvelopePayload {
               let userId = raw["user_id"] as? String,
               let clientId = raw["client_id"] as? String,
               let timestamp = (raw["ts"] as? NSNumber)?.int64Value,
+              raw["capture_server_ms"] is NSNumber,
               let opId = raw["op_id"] as? String else { return nil }
         let serverSeq: Int64?
         if let value = raw["server_seq"] {
@@ -109,7 +110,8 @@ struct LiveStrokeEnvelopePayload {
               LiveStrokePhases.all.contains(phase),
               let chunkSeq = (raw["chunk_seq"] as? NSNumber)?.intValue,
               let pointOffset = (raw["point_offset"] as? NSNumber)?.intValue,
-              raw["ts"] is NSNumber else { return nil }
+              raw["ts"] is NSNumber,
+              raw["capture_server_ms"] is NSNumber else { return nil }
         var pointCount = 0
         if let points = raw["points"] {
             guard let values = points as? [[String: Any]] else { return nil }

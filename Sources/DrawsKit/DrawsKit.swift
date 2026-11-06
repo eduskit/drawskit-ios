@@ -3,7 +3,7 @@ import UIKit
 
 /// DrawsKit 互动白板 SDK（iOS）— 公开 API 薄封装，业务逻辑在 Rust 引擎。
 public final class DrawsKit {
-    public static let SDK_VERSION = "0.1.9"
+    public static let SDK_VERSION = "0.2.0"
 
     public static let EVENT = DrawsKitConstants.EVENT.self
     public static let ToolType = DrawsKitConstants.ToolType.self
@@ -91,6 +91,19 @@ public final class DrawsKit {
     // ── 同步与数据 ──
 
     public func addSyncData(_ data: Any) { engine.addSyncData(data) }
+
+    /// 课堂媒体时钟。`displayedMs` 为空时回到原有的到达抖动缓冲。
+    public func setMediaClock(serverMs: UInt64, localMs: UInt64, displayedMs: UInt64?) {
+        var event: [String: Any] = [
+            "type": "set_media_clock",
+            "server_ms": serverMs,
+            "local_ms": localMs,
+        ]
+        if let displayedMs { event["displayed_ms"] = displayedMs }
+        guard let data = try? JSONSerialization.data(withJSONObject: event),
+              let json = String(data: data, encoding: .utf8) else { return }
+        engine.send(json)
+    }
     public func addAckData(_ data: Any) { engine.addAckData(data) }
     public func syncAndReload() { engine.syncAndReload() }
     public func renderHistoryData(_ data: Any) { engine.renderHistoryData(data) }

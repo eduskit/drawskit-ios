@@ -92,10 +92,12 @@ enum PlatformEventType {
     static let pruneLiveStrokes = "prune_live_strokes"
     static let setLiveStrokeRate = "set_live_stroke_rate"
     static let tickLiveStrokes = "tick_live_strokes"
+    static let setMediaClock = "set_media_clock"
     static let setCollabCheckpoint = "set_collab_checkpoint"
     static let setCollabContext = "set_collab_context"
     static let setLocalEditPermission = "set_local_edit_permission"
     static let setCollaborationEnabled = "set_collaboration_enabled"
     static let setRenderCapabilities = "set_render_capabilities"
     static let setLogLevel = "set_log_level"
+    static let replayReset = "replay_reset"
 }
