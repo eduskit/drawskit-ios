@@ -3,7 +3,7 @@ import UIKit
 
 /// DrawsKit 互动白板 SDK（iOS）— 公开 API 薄封装，业务逻辑在 Rust 引擎。
 public final class DrawsKit {
-    public static let SDK_VERSION = "0.2.0"
+    public static let SDK_VERSION = "0.2.1"
 
     public static let EVENT = DrawsKitConstants.EVENT.self
     public static let ToolType = DrawsKitConstants.ToolType.self
