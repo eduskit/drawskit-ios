@@ -70,11 +70,8 @@ final class SyncCoordinator {
     private var liveStrokeTickerDestroyed = false
     /// Room-wide live-ink message budget shared by everyone drawing.
     private static let liveStrokeBudgetQps = 8
-    /// How long a stroke may stay silent while betting it can be delivered as a
-    /// single `end` message carrying its whole timeline. Most strokes finish
-    /// inside this window and then cost one message instead of a paced sequence
-    /// of chunks. Zero streams every stroke from its first move.
-    private static let liveStrokeSingleShotMaxMs: Int64 = 1_500
+    /// Mirrors whiteboard-core. Zero streams from the first pointer move.
+    private static let liveStrokeSingleShotMaxMs: Int64 = 0
     /// Shared policy runtime (`drawskit-sdk-sync` via FFI).
     private let syncRuntime: SyncRuntime
     /// Once true, runtime commands and late exports are no-ops.
