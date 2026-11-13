@@ -20,7 +20,7 @@ dependencies: [
 SPM 从 `https://sdk.eduskit.com/drawskit/ios/<版本>/binary.zip` 下载多架构 Rust
 XCFramework，并使用 `Package.swift` 中的 checksum 校验。完整手动集成包仍可从
 `https://sdk.eduskit.com/drawskit/ios/<版本>/sdk.zip` 下载。构建命令为
-`pnpm release:pack ios`。详见 [SDK 发布流程](https://github.com/eduskit/drawskit/blob/55c98f7eebd5a704bc3afb1cb44377f9c53b9128/docs/releasing.md)。
+`pnpm release:pack ios`。详见 [SDK 发布流程](https://github.com/eduskit/drawskit/blob/948ac34a11287caec69bd57c2e66bcb4288669b9/docs/releasing.md)。
 
 ## 快速上手
 
